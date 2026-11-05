@@ -1,0 +1,12 @@
+.env
+venv
+service_account.json
+venv/
+storage/
+faiss_store/
+logs/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+google-credentials*.json
