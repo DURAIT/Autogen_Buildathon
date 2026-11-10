@@ -9,7 +9,7 @@ from autogen_ext.models.openai import OpenAIChatCompletionClient
 from dotenv import load_dotenv
 
 from .email_service import EscalationMailer
-from .rag import HashingEmbedder, OpenAICompatibleEmbedder
+from .rag import HashingEmbedder, LocalSentenceTransformerEmbedder, OpenAICompatibleEmbedder
 
 
 @dataclass(frozen=True)
@@ -57,8 +57,8 @@ class Settings:
             raise ValueError("MCP_TIMEOUT_SECONDS must be a positive finite value")
         if not 1 <= self.smtp_port <= 65535:
             raise ValueError("SMTP_PORT must be between 1 and 65535")
-        if self.embedding_backend not in {"hashing", "openai-compatible"}:
-            raise ValueError("EMBEDDING_BACKEND must be hashing or openai-compatible")
+        if self.embedding_backend not in {"local", "hashing", "openai-compatible"}:
+            raise ValueError("EMBEDDING_BACKEND must be local, hashing, or openai-compatible")
         if self.embedding_dimension <= 0:
             raise ValueError("EMBEDDING_DIMENSION must be positive")
         if not math.isfinite(self.embedding_timeout_seconds) or self.embedding_timeout_seconds <= 0:
@@ -88,12 +88,12 @@ class Settings:
             smtp_username=os.getenv("SMTP_USERNAME", ""),
             smtp_password=os.getenv("SMTP_PASSWORD", ""),
             smtp_sender=os.getenv("SMTP_SENDER", ""),
-            support_email=os.getenv("SUPPORT_EMAIL", "titu.durais@gmail.com"),
+            support_email=os.getenv("SUPPORT_EMAIL", ""),
             google_sheets_enabled=os.getenv("ENABLE_GOOGLE_SHEETS_SYNC", "false").lower()
             == "true",
             google_service_account_file=os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", ""),
             google_sheets_spreadsheet_id=os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", ""),
-            embedding_backend=os.getenv("EMBEDDING_BACKEND", "hashing").strip().lower(),
+            embedding_backend=os.getenv("EMBEDDING_BACKEND", "local").strip().lower(),
             embedding_base_url=os.getenv(
                 "EMBEDDING_BASE_URL", os.getenv("OPENAI_BASE_URL", "")
             ),
@@ -107,6 +107,8 @@ class Settings:
         )
 
     def build_embedder(self):
+        if self.embedding_backend == "local":
+            return LocalSentenceTransformerEmbedder()
         if self.embedding_backend == "hashing":
             return HashingEmbedder()
         return OpenAICompatibleEmbedder(

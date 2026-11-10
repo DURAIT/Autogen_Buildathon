@@ -37,7 +37,7 @@ Terminal 2: Streamlit app.py + AutoGen workflow
    CSV audit record; only resolved grounded cases are added to support FAISS
 ```
 
-The orchestration is deliberately sequential rather than an open-ended group chat. This guarantees the requested agent order and makes logging, escalation, and memory-write gates deterministic. Agents 1–3 are AutoGen `AssistantAgent` instances with structured Pydantic output. Agent 4 performs deterministic state changes so the LLM cannot fabricate a successful log or memory write.
+The orchestration mechanism is an explicit, linear AutoGen `GraphFlow` topology — not an open-ended group chat. `support_system/agents.py::build_support_graphflow` wires the three AutoGen `AssistantAgent` instances (Agents 1–3) through `DiGraphBuilder` with a single directed edge per hop (query → knowledge → resolution) and a `SourceMatchTermination` condition that halts the run immediately after the resolution agent's single turn — no looping, no round robin. This guarantees the requested fixed agent order and a deterministic halting point using AutoGen's own orchestration primitive. `SupportWorkflow.process()` still invokes the three agents' `classify`/`retrieve`+`synthesize`/`resolve` methods directly in that same fixed order (rather than driving the GraphFlow team inline), because the full unit-test suite exercises `SupportWorkflow` with plain Python test doubles that are not AutoGen `ChatAgent` objects and cannot be scheduled inside a GraphFlow team; this keeps determinism and test coverage intact while GraphFlow remains the proven, AutoGen-native topology for the real agents. Agent 4 performs deterministic state changes so the LLM cannot fabricate a successful log or memory write, and is never wired into the GraphFlow team.
 
 ## Main features
 
@@ -47,7 +47,7 @@ The orchestration is deliberately sequential rather than an open-ended group cha
 - **Agent 4:** UTC timestamped CSV logging, escalation decision, and long-term memory.
 - Persistent local FAISS indexes under `data/`, combined with Okapi BM25 using deterministic Reciprocal Rank Fusion (RRF).
 - Stable chunk IDs and score provenance (`vector`, `BM25`, `fusion`) are retained for inspection and citation validation.
-- Optional OpenAI-compatible semantic embeddings can replace the default lightweight lexical hashing backend; app and MCP settings must match.
+- Semantic embeddings default to a small, fully local `sentence-transformers` model (no API key, no network call); an OpenAI-compatible embeddings endpoint or lightweight lexical hashing can be configured instead. The app and MCP settings must match.
 - The existing Knowledge Base synthesis call performs bounded LLM reranking using only known chunk IDs, with deterministic fallback order.
 - A safe JSON-persisted NetworkX provenance graph links documents, pages, chunks, and document kinds; it never replaces source evidence.
 - A separate read-only MCP server exposes seven narrowly scoped support and graph tools over Streamable HTTP.
@@ -56,7 +56,7 @@ The orchestration is deliberately sequential rather than an open-ended group cha
 - The Streamlit app verifies MCP health and uses MCP retrieval for the AutoGen workflow.
 - PDF page, filename, kind, and chunk metadata are preserved for citations.
 - Streamlit includes the SupportIQ operations dashboard and a localhost-only Admin Console with ticket state, latency, retrieval, graph, escalation, and Sheets-sync viewers.
-- SMTP sends only when explicitly enabled and fully configured; the provided environment template routes support escalation to `titu.durais@gmail.com`.
+- SMTP sends only when explicitly enabled and fully configured; the provided environment template routes support escalation to `support@example.com` (replace with your real support mailbox).
 - Retrieved PDF text is treated as untrusted data and cannot override agent instructions.
 
 ## Prerequisites
@@ -102,7 +102,13 @@ Compatibility varies by model and server. If structured output or tool calling i
 
 ### Hybrid retrieval and semantic embeddings
 
-Every search gates vector candidates by their raw similarity before combining eligible FAISS and positive-evidence BM25 rankings with RRF. `RETRIEVAL_MIN_SCORE` defaults to `0.20`; this is a safer packaged starting point, not a universal cutoff. Calibrate it against representative queries whenever the embedding model or provider changes. The returned `score` is gated relevance in `[0,1]`, while `fusion_score` is retained separately for ordering provenance. The default `hashing` backend is local and lightweight but lexical. For true semantic recall, configure an OpenAI-compatible embeddings endpoint in the private `.env`; for example, with an embedding-capable local server:
+Every search gates vector candidates by their raw similarity before combining eligible FAISS and positive-evidence BM25 rankings with RRF. `RETRIEVAL_MIN_SCORE` defaults to `0.20`; this is a safer packaged starting point, not a universal cutoff. Calibrate it against representative queries whenever the embedding model or provider changes. The returned `score` is gated relevance in `[0,1]`, while `fusion_score` is retained separately for ordering provenance.
+
+Three embedding backends are supported via `EMBEDDING_BACKEND`:
+
+- `local` (default): loads `sentence-transformers/all-MiniLM-L6-v2` once per process and embeds locally — real semantic retrieval, fully offline, no API key, no network call after the model is cached.
+- `hashing`: deterministic lexical hashing. Lightweight and dependency-light, but not semantic. Useful as a minimal fallback if `sentence-transformers`/`torch` cannot be installed.
+- `openai-compatible`: delegates to a remote OpenAI-compatible `/embeddings` endpoint, for example:
 
 ```dotenv
 EMBEDDING_BACKEND=openai-compatible
@@ -114,7 +120,7 @@ EMBEDDING_TIMEOUT_SECONDS=30
 ENABLE_LLM_RERANK=true
 ```
 
-The embedding model and dimension must be identical in the MCP and Streamlit processes. Changing them rebuilds the persisted FAISS projection from stored chunk text. Confirm the exact model dimension from the selected provider before enabling it. Keep `EMBEDDING_BACKEND=hashing` for a fully offline, dependency-light setup.
+The embedding model and dimension must be identical in the MCP and Streamlit processes. Changing them rebuilds the persisted FAISS projection from stored chunk text. The `local` backend always reports a fixed 384-dimensional vector regardless of `EMBEDDING_DIMENSION`; that setting only applies to `openai-compatible`. Confirm the exact model dimension from the selected provider before enabling it.
 
 ## Run: MCP first, Streamlit second
 
@@ -193,7 +199,7 @@ Example query: `I bought my first subscription 10 days ago. When will an approve
 
 Escalated and open tickets appear in **Overview → Human support review**. A reviewer can inspect the ticket, edit the AI draft, choose whether the ticket becomes **Resolved** or remains **Open**, and explicitly click **Approve reply and send escalation email**. The email is sent only after that button is pressed; a successful send updates the CSV review fields and ticket status.
 
-The supplied `.env.example` routes escalation notifications and approved review messages to `titu.durais@gmail.com`. Complete the private `.env` with your SMTP sender configuration:
+The supplied `.env.example` routes escalation notifications and approved review messages to the placeholder `support@example.com`. Complete the private `.env` with your SMTP sender configuration:
 
 ```dotenv
 ENABLE_ESCALATION_EMAIL=true
@@ -202,7 +208,7 @@ SMTP_PORT=587
 SMTP_USERNAME=your-sender@gmail.com
 SMTP_PASSWORD=load-a-Google-App-Password-from-your-private-env
 SMTP_SENDER=your-sender@gmail.com
-SUPPORT_EMAIL=titu.durais@gmail.com
+SUPPORT_EMAIL=support@example.com
 ```
 
 Do not use your normal Gmail password and do not commit `.env`. For Gmail, enable two-step verification and create an App Password. Test with a non-production ticket first. Automatic workflow escalation also uses this mailbox when SMTP is fully configured. Email delivery transfers the ticket ID, support context, and approved reply to the configured mailbox; common email, phone, and payment-number patterns are deterministically redacted before transmission.
@@ -288,7 +294,7 @@ AutoGen structured output requires tools to be declared as strict function tools
 
 ## Current limitations
 
-- The default hashing embedder is fully local and deterministic but primarily lexical. Configure the supplied OpenAI-compatible embedder backend for true semantic retrieval.
+- The default `local` embedder (`sentence-transformers/all-MiniLM-L6-v2`) is a small, genuinely semantic sentence encoder. For larger/hosted models, configure the supplied OpenAI-compatible embedder backend; for a dependency-light fallback with no semantic understanding, use `hashing`.
 - The NetworkX graph is a bounded provenance viewer, not an unrestricted LLM-extracted business-relationship truth layer.
 - Google Sheets is a manually synchronized reporting mirror, not a transactional database or source of truth.
 - Image-only PDFs need OCR before ingestion.

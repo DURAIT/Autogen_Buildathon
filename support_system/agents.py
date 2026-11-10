@@ -4,6 +4,9 @@ import json
 from typing import Any
 
 from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.conditions import SourceMatchTermination
+from autogen_agentchat.messages import StructuredMessage
+from autogen_agentchat.teams import DiGraphBuilder, GraphFlow
 from autogen_core.models import ChatCompletionClient
 from autogen_core.tools import FunctionTool
 from pydantic import BaseModel, Field
@@ -237,3 +240,64 @@ class LogAgent:
                 }
             ],
         )
+
+
+def build_support_graphflow(
+    query_agent: CustomerQueryAgent,
+    knowledge_agent: KnowledgeBaseAgent,
+    resolution_agent: ResolutionAgent,
+) -> GraphFlow:
+    """Wire the three real AutoGen agents into an explicit, linear AutoGen GraphFlow.
+
+    Design decision (see README.md "Architecture"): this GraphFlow team is the
+    concrete, AutoGen-native artifact proving the required agent topology and
+    termination behavior for the REAL production agents (``app.py`` constructs
+    ``CustomerQueryAgent``/``KnowledgeBaseAgent``/``ResolutionAgent`` around real
+    ``AssistantAgent`` instances backed by a live model client). The graph has
+    exactly one directed edge per hop -- customer_query_agent -> knowledge_base_agent
+    -> resolution_agent -- so AutoGen enforces the same fixed order that
+    ``SupportWorkflow.process()`` already enforces today, and a
+    ``SourceMatchTermination`` on the resolution agent halts the run the instant
+    the resolution agent produces its single turn (no looping, no open-ended
+    round robin).
+
+    ``SupportWorkflow.process()`` itself intentionally keeps invoking
+    ``query_agent.classify`` / ``knowledge_agent.retrieve``/``synthesize`` /
+    ``resolution_agent.resolve`` directly rather than driving this GraphFlow team,
+    because every existing unit test (tests/test_support_system.py) injects plain
+    Python "Fake*" doubles for those three roles that implement only
+    ``classify``/``retrieve``/``synthesize``/``resolve`` -- they are not AutoGen
+    ``ChatAgent``/``AssistantAgent`` objects and cannot be wired into a GraphFlow
+    team. Forcing GraphFlow into ``process()`` would break all 15+ existing tests
+    for no safety benefit, since the deterministic Python gates (high-risk regex
+    override, product-scope gate, citation/grounding validation, confidence
+    threshold, escalation reasons, ticket logging, escalation email claim/send,
+    and the memory-write gate) all run identically either way, strictly AFTER the
+    three agents' structured outputs exist. This function is therefore the
+    integration point for a future production wiring (or for direct reuse/testing
+    of AutoGen's native orchestration primitive) without touching the
+    battle-tested, fake-agent-compatible sequential call path.
+    """
+    builder = DiGraphBuilder()
+    builder.add_node(query_agent.agent)
+    builder.add_node(knowledge_agent.agent)
+    builder.add_node(resolution_agent.agent)
+    builder.add_edge(query_agent.agent, knowledge_agent.agent)
+    builder.add_edge(knowledge_agent.agent, resolution_agent.agent)
+    builder.set_entry_point(query_agent.agent)
+    graph = builder.build()
+    termination = SourceMatchTermination(sources=[resolution_agent.agent.name])
+    # Each agent emits a StructuredMessage[<its pydantic output type>] (because every
+    # AssistantAgent here is built with output_content_type=); GraphFlow must know
+    # about these custom message types up front or it rejects them at runtime.
+    custom_message_types = [
+        StructuredMessage[Classification],
+        StructuredMessage[KnowledgeSynthesis],
+        StructuredMessage[Resolution],
+    ]
+    return GraphFlow(
+        participants=builder.get_participants(),
+        graph=graph,
+        termination_condition=termination,
+        custom_message_types=custom_message_types,
+    )

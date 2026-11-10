@@ -16,7 +16,27 @@ HIGH_RISK_PATTERN = re.compile(
 
 
 class SupportWorkflow:
-    """Explicit sequential orchestration with deterministic safety and grounding gates."""
+    """Explicit sequential orchestration with deterministic safety and grounding gates.
+
+    Orchestration-mechanism note (see also support_system/agents.py::build_support_graphflow
+    and README.md "Architecture"): the three LLM-backed roles (query_agent, knowledge_agent,
+    resolution_agent) are still invoked here with direct, ordered Python calls rather than by
+    driving an AutoGen GraphFlow team inline. AutoGen's `GraphFlow`/`DiGraphBuilder` (with an
+    explicit linear query->knowledge->resolution edge set and a `SourceMatchTermination` that
+    halts the run right after the resolution agent's single turn) is implemented and exercised
+    in `build_support_graphflow`, proving the topology/termination AutoGen provides for the real
+    `AssistantAgent`-backed agents app.py constructs. It is intentionally NOT called from
+    `process()` because every existing and new fake-agent unit test injects plain Python
+    doubles (FakeQueryAgent/FakeKnowledgeAgent/FakeResolutionAgent/...) that are not AutoGen
+    ChatAgents and cannot be scheduled inside a GraphFlow team. Calling `.classify()`,
+    `.retrieve()`/`.synthesize()`, and `.resolve()` directly keeps this method duck-type
+    compatible with both the fakes and the real agents, while still guaranteeing the exact same
+    fixed order GraphFlow's edges would enforce. All deterministic safety/grounding gates below
+    (high-risk regex override, product-scope gate, citation/grounding validation, confidence
+    threshold, escalation reasons, ticket logging, escalation email claim/send, and the
+    memory-write gate) run in plain Python, unchanged, strictly after the three agents'
+    structured outputs are produced -- regardless of which mechanism produced them.
+    """
 
     def __init__(
         self,

@@ -115,6 +115,56 @@ class OpenAICompatibleEmbedder:
         return vectors
 
 
+class LocalSentenceTransformerEmbedder:
+    """Fully local, offline, no-API-key semantic embedder.
+
+    Loads ``sentence-transformers/all-MiniLM-L6-v2`` once per process (cached on the
+    instance) and produces 384-dimensional sentence embeddings without any network
+    call or API key, matching the ``Embedder`` protocol used by ``LocalFaissStore``.
+    """
+
+    _MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+    _MODEL_DIMENSION = 384
+    _shared_model: Any = None
+    _shared_model_name: str | None = None
+
+    def __init__(self, model_name: str | None = None) -> None:
+        self.model_name = model_name or self._MODEL_NAME
+        # The configured EMBEDDING_DIMENSION is intentionally ignored: this backend
+        # always reports its own fixed, actual model dimension, following the same
+        # self-describing `.dimension` pattern as HashingEmbedder/OpenAICompatibleEmbedder.
+        self.dimension = self._MODEL_DIMENSION
+        self.version = f"local-sentence-transformer:{self.model_name}:{self.dimension}"
+        self._model = self._load_model(self.model_name)
+
+    @classmethod
+    def _load_model(cls, model_name: str) -> Any:
+        # Cache the loaded model at class level so repeated LocalFaissStore/embedder
+        # construction within a process never reloads model weights from disk.
+        if cls._shared_model is None or cls._shared_model_name != model_name:
+            from sentence_transformers import SentenceTransformer
+
+            cls._shared_model = SentenceTransformer(model_name)
+            cls._shared_model_name = model_name
+        return cls._shared_model
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.empty((0, self.dimension), dtype="float32")
+        vectors = np.asarray(
+            self._model.encode(texts, convert_to_numpy=True), dtype="float32"
+        )
+        if vectors.shape != (len(texts), self.dimension):
+            raise ValueError(
+                "Local sentence-transformer model returned an unexpected shape: "
+                f"expected {(len(texts), self.dimension)}, got {vectors.shape}"
+            )
+        # Normalize consistent with HashingEmbedder/OpenAICompatibleEmbedder, which
+        # both L2-normalize so inner-product FAISS search behaves as cosine similarity.
+        faiss.normalize_L2(vectors)
+        return vectors
+
+
 class LocalFaissStore:
     """Persistent FAISS index with synchronized, transactional local writes."""
 
